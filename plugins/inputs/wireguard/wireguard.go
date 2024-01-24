@@ -17,8 +17,9 @@ import (
 var sampleConfig string
 
 const (
-	measurementDevice = "wireguard_device"
-	measurementPeer   = "wireguard_peer"
+	measurementDevice   = "wireguard_device"
+	measurementPeer     = "wireguard_peer"
+	wireguardConfigRoot = "/etc/wireguard"
 )
 
 var (
@@ -35,7 +36,8 @@ type Wireguard struct {
 	Devices []string        `toml:"devices"`
 	Log     telegraf.Logger `toml:"-"`
 
-	client *wgctrl.Client
+	client    *wgctrl.Client
+	extraTags map[string]map[string]map[string]string
 }
 
 func (*Wireguard) SampleConfig() string {
@@ -45,9 +47,19 @@ func (*Wireguard) SampleConfig() string {
 func (wg *Wireguard) Init() error {
 	var err error
 
-	wg.client, err = wgctrl.New()
+	if wg.client, err = wgctrl.New(); err != nil {
+		return err
+	}
 
-	return err
+	parser := &ConfigParser{root: wireguardConfigRoot}
+
+	if err = parser.Parse(); err != nil {
+		return err
+	}
+
+	wg.extraTags = parser.extraTags
+
+	return nil
 }
 
 func (wg *Wireguard) Gather(acc telegraf.Accumulator) error {
@@ -115,12 +127,13 @@ func (wg *Wireguard) gatherDevicePeerMetrics(acc telegraf.Accumulator, device *w
 		"allowed_ips":                      len(peer.AllowedIPs),
 	}
 
+	var allowedIps = ""
 	if len(peer.AllowedIPs) > 0 {
 		cidrs := []string{}
 		for _, ip := range peer.AllowedIPs {
 			cidrs = append(cidrs, ip.String())
 		}
-		fields["allowed_peer_cidr"] = strings.Join(cidrs, ",")
+		allowedIps = strings.Join(cidrs, ",")
 	}
 
 	gauges := map[string]interface{}{
@@ -130,8 +143,17 @@ func (wg *Wireguard) gatherDevicePeerMetrics(acc telegraf.Accumulator, device *w
 	}
 
 	tags := map[string]string{
-		"device":     device.Name,
-		"public_key": peer.PublicKey.String(),
+		"device":      device.Name,
+		"public_key":  peer.PublicKey.String(),
+		"allowed_ips": allowedIps,
+	}
+
+	if extraTagsByPublicKey, exists := wg.extraTags[device.Name]; exists {
+		if extraTags, exists := extraTagsByPublicKey[peer.PublicKey.String()]; exists {
+			for name, value := range extraTags {
+				tags[name] = value
+			}
+		}
 	}
 
 	acc.AddFields(measurementPeer, fields, tags)
